@@ -28,21 +28,40 @@ A modern, lean web UI for Apache Zookeeper with protobuf deserialization support
 
 ## Quick Start
 
-### Using Docker Compose
-
-```bash
-docker-compose up -d
-```
-
-Open http://localhost:3000
-
-### Using Docker Hub
+### Using Docker Hub (recommended)
 
 ```bash
 docker run -p 3000:3000 \
   -e ZK_CONNECTION_STRING=your-zk-host:2181 \
   -v ./protos:/app/protos \
   ssubbotin/zookeeper-ui
+```
+
+Open http://localhost:3000
+
+### Using Docker Compose
+
+```yaml
+services:
+  zookeeper-ui:
+    image: ssubbotin/zookeeper-ui:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - ZK_CONNECTION_STRING=zookeeper:2181
+    volumes:
+      - ./protos:/app/protos
+    depends_on:
+      - zookeeper
+
+  zookeeper:
+    image: zookeeper:3.9
+    ports:
+      - "2181:2181"
+```
+
+```bash
+docker-compose up -d
 ```
 
 ### Local Development
