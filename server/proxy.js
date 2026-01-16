@@ -169,18 +169,51 @@ function zkGetACL(path) {
 
 // Format stat for JSON response
 function formatStat(stat) {
+  // Helper to safely format date
+  const formatDate = (val) => {
+    try {
+      let num
+      if (Buffer.isBuffer(val)) {
+        num = Number(val.readBigInt64BE?.() ?? 0)
+      } else if (typeof val === 'object') {
+        num = Number(val)
+      } else {
+        num = val
+      }
+      if (!num || num <= 0) return null
+      return new Date(num).toISOString()
+    } catch {
+      return null
+    }
+  }
+
+  // Helper to safely convert to string (handles Buffer/Long objects)
+  const toString = (val) => {
+    try {
+      if (!val) return '0'
+      if (Buffer.isBuffer(val)) {
+        const bigint = val.readBigInt64BE?.()
+        return bigint !== undefined ? bigint.toString() : val.toString('hex')
+      }
+      if (typeof val === 'object' && val.toString) return val.toString()
+      return String(val)
+    } catch {
+      return '0'
+    }
+  }
+
   return {
-    czxid: stat.czxid.toString(),
-    mzxid: stat.mzxid.toString(),
-    ctime: new Date(stat.ctime).toISOString(),
-    mtime: new Date(stat.mtime).toISOString(),
+    czxid: toString(stat.czxid),
+    mzxid: toString(stat.mzxid),
+    ctime: formatDate(stat.ctime),
+    mtime: formatDate(stat.mtime),
     version: stat.version,
     cversion: stat.cversion,
     aversion: stat.aversion,
-    ephemeralOwner: stat.ephemeralOwner.toString(),
+    ephemeralOwner: toString(stat.ephemeralOwner),
     dataLength: stat.dataLength,
     numChildren: stat.numChildren,
-    pzxid: stat.pzxid.toString()
+    pzxid: toString(stat.pzxid)
   }
 }
 
