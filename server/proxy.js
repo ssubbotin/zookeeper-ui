@@ -5,6 +5,8 @@ import protobuf from 'protobufjs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { readdir, readFile } from 'fs/promises'
+import { createRequire } from 'module'
+const require = createRequire(import.meta.url)
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -15,7 +17,15 @@ app.use(express.json())
 // Configuration
 const ZK_CONNECTION_STRING = process.env.ZK_CONNECTION_STRING || 'localhost:2181'
 const PROTO_DIR = process.env.PROTO_DIR || join(__dirname, '../protos')
-const PROTO_PATH_MAPPING = process.env.PROTO_PATH_MAPPING || ''
+const PROTO_IMPORT_PREFIX = process.env.PROTO_IMPORT_PREFIX || ''  // e.g., 'myapp/proto/'
+const GOOGLE_PROTOS_DIR = process.env.GOOGLE_PROTOS_DIR || '/app/google-protos'
+const READ_ONLY = process.env.READ_ONLY === 'true' || process.env.READ_ONLY === '1'
+
+// ZK path to protobuf type mapping
+// Format: "segment:MessageType,segment:MessageType,..."
+// e.g., "backends:myapp.Backend,configs:myapp.Config"
+const ZK_PATH_TYPE_MAP = process.env.ZK_PATH_TYPE_MAP || ''
+const ZK_ROOT_PATH = process.env.ZK_ROOT_PATH || ''  // e.g., '/myapp_prod'
 
 // Zookeeper client
 let zkClient = null
@@ -25,13 +35,34 @@ let zkConnected = false
 let protoRoot = new protobuf.Root()
 let messageTypes = []
 
-// Parse path mapping
-const pathMappings = PROTO_PATH_MAPPING
-  ? PROTO_PATH_MAPPING.split(',').map(m => {
-      const [path, type] = m.split(':')
-      return { path, type }
-    })
-  : []
+// Parse ZK path to type mapping
+const zkPathTypeMap = new Map()
+if (ZK_PATH_TYPE_MAP) {
+  ZK_PATH_TYPE_MAP.split(',').forEach(mapping => {
+    const [segment, type] = mapping.split(':').map(s => s.trim())
+    if (segment && type) {
+      zkPathTypeMap.set(segment, type)
+    }
+  })
+}
+
+// Get message type for a ZK path based on mapping
+function getMessageTypeForPath(zkPath) {
+  if (!zkPath || zkPathTypeMap.size === 0) return null
+
+  // Strip root path if configured
+  let relativePath = zkPath
+  if (ZK_ROOT_PATH && zkPath.startsWith(ZK_ROOT_PATH)) {
+    relativePath = zkPath.slice(ZK_ROOT_PATH.length)
+  }
+
+  // Get first segment after root (e.g., /backends/foo/bar -> backends)
+  const segments = relativePath.split('/').filter(s => s)
+  if (segments.length === 0) return null
+
+  const firstSegment = segments[0]
+  return zkPathTypeMap.get(firstSegment) || null
+}
 
 // Connect to Zookeeper
 function connectZk() {
@@ -73,14 +104,38 @@ async function loadProtos() {
 
     protoRoot = new protobuf.Root()
 
-    for (const file of protoFiles) {
-      const filePath = join(PROTO_DIR, file)
-      try {
-        await protoRoot.load(filePath)
-        console.log('Loaded proto file:', file)
-      } catch (err) {
-        console.error('Failed to load proto file:', file, err.message)
+    // Configure path resolution for imports
+    protoRoot.resolvePath = (origin, target) => {
+      // If target is already an absolute path, return it as-is
+      if (target.startsWith('/')) {
+        return target
       }
+      if (target.startsWith('google/protobuf/')) {
+        // Use protobufjs bundled google protos
+        return join(dirname(require.resolve('protobufjs')), target)
+      }
+      if (target.startsWith('google/api/')) {
+        // Google API protos bundled in separate dir (not overwritten by volume mount)
+        return join(GOOGLE_PROTOS_DIR, target)
+      }
+      if (PROTO_IMPORT_PREFIX && target.startsWith(PROTO_IMPORT_PREFIX)) {
+        // Map configured import prefix to PROTO_DIR
+        return join(PROTO_DIR, target.slice(PROTO_IMPORT_PREFIX.length))
+      }
+      // For relative imports, resolve relative to origin's directory
+      if (origin) {
+        return join(dirname(origin), target)
+      }
+      return join(PROTO_DIR, target)
+    }
+
+    // Load all proto files together to resolve cross-file dependencies
+    const filePaths = protoFiles.map(f => join(PROTO_DIR, f))
+    try {
+      await protoRoot.load(filePaths)
+      console.log('Loaded proto files:', protoFiles.join(', '))
+    } catch (err) {
+      console.error('Failed to load proto files:', err.message)
     }
 
     // Extract all message types
@@ -359,7 +414,11 @@ app.get('/api/info', async (req, res) => {
     connected: zkConnected,
     connectionString: ZK_CONNECTION_STRING,
     protoDir: PROTO_DIR,
-    messageTypesCount: messageTypes.length
+    protoImportPrefix: PROTO_IMPORT_PREFIX,
+    zkRootPath: ZK_ROOT_PATH,
+    zkPathTypeMappings: Object.fromEntries(zkPathTypeMap),
+    messageTypesCount: messageTypes.length,
+    readOnly: READ_ONLY
   })
 })
 
@@ -372,7 +431,8 @@ app.get('/api/protos', async (req, res) => {
     res.json({
       files: protoFiles,
       messageTypes,
-      pathMappings
+      zkRootPath: ZK_ROOT_PATH,
+      zkPathTypeMappings: Object.fromEntries(zkPathTypeMap)
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -388,13 +448,10 @@ app.post('/api/decode', async (req, res) => {
       return res.status(400).json({ error: 'No data provided' })
     }
 
-    // Determine message type (explicit or from path mapping)
+    // Determine message type (explicit or from ZK path mapping)
     let typeName = messageType
     if (!typeName && path) {
-      const mapping = pathMappings.find(m => path.startsWith(m.path))
-      if (mapping) {
-        typeName = mapping.type
-      }
+      typeName = getMessageTypeForPath(path)
     }
 
     if (!typeName) {
@@ -421,20 +478,96 @@ app.post('/api/decode', async (req, res) => {
   }
 })
 
+// Helper: recursively convert string numbers to actual numbers for protobuf encoding
+function convertStringNumbers(obj) {
+  if (obj === null || obj === undefined) return obj
+  if (Array.isArray(obj)) {
+    return obj.map(convertStringNumbers)
+  }
+  if (typeof obj === 'object') {
+    const result = {}
+    for (const [key, value] of Object.entries(obj)) {
+      result[key] = convertStringNumbers(value)
+    }
+    return result
+  }
+  if (typeof obj === 'string') {
+    // Check if it's a numeric string (integer or float)
+    if (/^-?\d+$/.test(obj)) {
+      // Integer - use BigInt for large numbers, regular number for small ones
+      const num = Number(obj)
+      if (Number.isSafeInteger(num)) {
+        return num
+      }
+      // For large integers, keep as string - protobufjs Long handles it
+      return obj
+    }
+    if (/^-?\d+\.\d+$/.test(obj)) {
+      return parseFloat(obj)
+    }
+  }
+  return obj
+}
+
+// API: Encode JSON data to protobuf binary
+app.post('/api/encode', async (req, res) => {
+  try {
+    const { data, messageType } = req.body
+
+    if (!data) {
+      return res.status(400).json({ error: 'No data provided' })
+    }
+
+    if (!messageType) {
+      return res.status(400).json({ error: 'No message type specified' })
+    }
+
+    const MessageType = protoRoot.lookupType(messageType)
+    if (!MessageType) {
+      return res.status(400).json({ error: `Message type not found: ${messageType}` })
+    }
+
+    // Convert string numbers back to numbers (they were stringified during decode for precision)
+    const convertedData = convertStringNumbers(data)
+
+    // Create and encode the message (fromObject handles type conversions)
+    const message = MessageType.fromObject(convertedData)
+    const buffer = MessageType.encode(message).finish()
+    const dataHex = Buffer.from(buffer).toString('hex')
+
+    res.json({ dataHex, size: buffer.length })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // API: Create or update node
 app.put('/api/node', async (req, res) => {
+  if (READ_ONLY) {
+    return res.status(403).json({ error: 'Server is in read-only mode' })
+  }
+
   if (!zkConnected) {
     return res.status(503).json({ error: 'Not connected to Zookeeper' })
   }
 
   try {
-    const { path, data } = req.body
+    const { path, data, dataHex } = req.body
 
     if (!path) {
       return res.status(400).json({ error: 'Path is required' })
     }
 
-    const buffer = data ? Buffer.from(data, 'utf8') : Buffer.alloc(0)
+    // Support both string data and hex-encoded binary data
+    let buffer
+    if (dataHex) {
+      buffer = Buffer.from(dataHex, 'hex')
+    } else if (data) {
+      buffer = Buffer.from(data, 'utf8')
+    } else {
+      buffer = Buffer.alloc(0)
+    }
+
     const exists = await zkExists(path)
 
     if (exists) {
@@ -451,6 +584,10 @@ app.put('/api/node', async (req, res) => {
 
 // API: Delete node
 app.delete('/api/node', async (req, res) => {
+  if (READ_ONLY) {
+    return res.status(403).json({ error: 'Server is in read-only mode' })
+  }
+
   if (!zkConnected) {
     return res.status(503).json({ error: 'Not connected to Zookeeper' })
   }
@@ -481,6 +618,14 @@ if (process.env.NODE_ENV === 'production') {
 const PORT = process.env.PORT || 3000
 
 async function start() {
+  console.log('Configuration:')
+  console.log('  ZK_CONNECTION_STRING:', ZK_CONNECTION_STRING)
+  console.log('  PROTO_DIR:', PROTO_DIR)
+  console.log('  PROTO_IMPORT_PREFIX:', PROTO_IMPORT_PREFIX || '(not set)')
+  console.log('  ZK_ROOT_PATH:', ZK_ROOT_PATH || '(not set)')
+  console.log('  ZK_PATH_TYPE_MAP:', zkPathTypeMap.size > 0 ? Object.fromEntries(zkPathTypeMap) : '(not set)')
+  console.log('  READ_ONLY:', READ_ONLY)
+
   await loadProtos()
   connectZk()
 

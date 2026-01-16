@@ -83,7 +83,10 @@ npm run dev
 | `ZK_CONNECTION_STRING` | `localhost:2181` | Zookeeper connection string |
 | `PORT` | `3000` | Server port (production) |
 | `PROTO_DIR` | `/app/protos` | Directory for .proto files |
-| `PROTO_PATH_MAPPING` | - | Path-to-message type mapping |
+| `PROTO_IMPORT_PREFIX` | - | Import path prefix to strip from proto imports |
+| `ZK_ROOT_PATH` | - | Root path prefix for ZK path mappings |
+| `ZK_PATH_TYPE_MAP` | - | Path segment to message type mapping |
+| `READ_ONLY` | `false` | Run in read-only mode (disables create/edit/delete) |
 
 ### Protobuf Setup
 
@@ -98,13 +101,38 @@ docker run -p 3000:3000 \
 
 ### Path-based Auto-Detection
 
-Set `PROTO_PATH_MAPPING` to automatically select message types based on node paths:
+Set `ZK_PATH_TYPE_MAP` to automatically select message types based on node paths.
+The format is `segment:MessageType,segment:MessageType,...`:
 
 ```bash
-PROTO_PATH_MAPPING=/config/users:UserConfig,/data/events:EventMessage
+ZK_PATH_TYPE_MAP="backends:myapp.Backend,configs:myapp.Config"
 ```
 
-When viewing `/config/users/user1`, the UI will automatically select `UserConfig` for decoding.
+When viewing `/backends/my-backend`, the UI will automatically decode using `myapp.Backend`.
+
+If your Zookeeper paths have a common prefix (e.g., `/myapp_prod`), set `ZK_ROOT_PATH`:
+
+```bash
+ZK_ROOT_PATH=/myapp_prod
+ZK_PATH_TYPE_MAP="backends:myapp.Backend,configs:myapp.Config"
+```
+
+This maps `/myapp_prod/backends/*` to `myapp.Backend` and `/myapp_prod/configs/*` to `myapp.Config`.
+
+### Read-Only Mode
+
+Run in read-only mode to prevent any modifications to Zookeeper data:
+
+```bash
+docker run -p 3000:3000 \
+  -e ZK_CONNECTION_STRING=zookeeper:2181 \
+  -e READ_ONLY=true \
+  ssubbotin/zookeeper-ui
+```
+
+When read-only mode is enabled:
+- Create, Edit, and Delete buttons are hidden from the UI
+- PUT and DELETE API requests return 403 Forbidden
 
 ## Project Structure
 
@@ -127,11 +155,12 @@ zookeeper-ui/
 | GET | `/api/node?path=/` | Get node data, stat, children, ACL |
 | GET | `/api/children?path=/` | Get children with metadata |
 | GET | `/api/search?pattern=` | Search nodes by path |
-| GET | `/api/info` | Server connection status |
+| GET | `/api/info` | Server connection status and config |
 | GET | `/api/protos` | List available message types |
 | POST | `/api/decode` | Decode binary data with protobuf |
-| PUT | `/api/node` | Create or update node |
-| DELETE | `/api/node?path=/path` | Delete node |
+| POST | `/api/encode` | Encode JSON to protobuf binary |
+| PUT | `/api/node` | Create or update node (disabled in read-only mode) |
+| DELETE | `/api/node?path=/path` | Delete node (disabled in read-only mode) |
 
 ## License
 

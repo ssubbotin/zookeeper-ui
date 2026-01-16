@@ -42,10 +42,17 @@ export async function decodeData(dataHex, messageType, path) {
   })
 }
 
-export async function createOrUpdateNode(path, data) {
+export async function encodeData(data, messageType) {
+  return fetchJson(`${API_BASE}/encode`, {
+    method: 'POST',
+    body: JSON.stringify({ data, messageType })
+  })
+}
+
+export async function createOrUpdateNode(path, data, dataHex = null) {
   return fetchJson(`${API_BASE}/node`, {
     method: 'PUT',
-    body: JSON.stringify({ path, data })
+    body: JSON.stringify({ path, data, dataHex })
   })
 }
 

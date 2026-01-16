@@ -7,17 +7,37 @@ import ServerInfo from './components/ServerInfo'
 import CreateNodeModal from './components/CreateNodeModal'
 import EditNodeModal from './components/EditNodeModal'
 
+// Get path from URL hash (e.g., #/myapp/backends -> /myapp/backends)
+function getPathFromHash() {
+  const hash = window.location.hash.slice(1) // Remove '#'
+  return hash || '/'
+}
+
+// Update URL hash from path
+function setHashFromPath(path) {
+  const newHash = path === '/' ? '' : path
+  if (window.location.hash.slice(1) !== newHash) {
+    window.history.pushState(null, '', newHash ? `#${newHash}` : window.location.pathname)
+  }
+}
+
 export default function App() {
-  const [selectedPath, setSelectedPath] = useState('/')
+  const [selectedPath, setSelectedPath] = useState(getPathFromHash)
   const [serverInfo, setServerInfo] = useState(null)
   const [infoLoading, setInfoLoading] = useState(true)
   const [error, setError] = useState(null)
   const [treeKey, setTreeKey] = useState(0)
+  const [filter, setFilter] = useState(null) // Set of visible paths or null
 
   // Modals
   const [createModal, setCreateModal] = useState(null) // parentPath or null
   const [editModal, setEditModal] = useState(null) // { path, data } or null
   const [deleteConfirm, setDeleteConfirm] = useState(null) // path or null
+
+  // Memoize filter change handler to prevent infinite loops
+  const handleFilterChange = useCallback((newFilter) => {
+    setFilter(newFilter)
+  }, [])
 
   const loadServerInfo = useCallback(async () => {
     setInfoLoading(true)
@@ -37,14 +57,29 @@ export default function App() {
     return () => clearInterval(interval)
   }, [loadServerInfo])
 
+  // Sync URL with selected path
+  useEffect(() => {
+    setHashFromPath(selectedPath)
+  }, [selectedPath])
+
+  // Handle browser back/forward navigation
+  useEffect(() => {
+    const handlePopState = () => {
+      setSelectedPath(getPathFromHash())
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
   const handleCreateNode = async (path, data) => {
     await createOrUpdateNode(path, data)
     setTreeKey((k) => k + 1) // Refresh tree
     setSelectedPath(path)
   }
 
-  const handleEditNode = async (path, data) => {
-    await createOrUpdateNode(path, data)
+  const handleEditNode = async (path, data, dataHex) => {
+    await createOrUpdateNode(path, data, dataHex)
+    setTreeKey((k) => k + 1) // Refresh to show updated data
   }
 
   const handleDeleteNode = async () => {
@@ -101,12 +136,13 @@ export default function App() {
         {/* Sidebar */}
         <aside className="w-80 border-r border-gray-200 flex flex-col bg-white">
           <div className="p-4 border-b border-gray-200">
-            <SearchBar onSelect={setSelectedPath} />
+            <SearchBar onFilterChange={handleFilterChange} />
           </div>
           <div className="flex-1 overflow-auto">
             <TreeView
               key={treeKey}
               selectedPath={selectedPath}
+              filter={filter}
               onSelect={setSelectedPath}
             />
           </div>
@@ -115,9 +151,11 @@ export default function App() {
         {/* Main panel */}
         <main className="flex-1 bg-white overflow-hidden">
           <NodeView
+            key={treeKey}
             path={selectedPath}
+            readOnly={serverInfo?.readOnly}
             onCreateChild={(parentPath) => setCreateModal(parentPath)}
-            onEdit={(path, data) => setEditModal({ path, data })}
+            onEdit={(path, data, decoded, messageType) => setEditModal({ path, data, decoded, messageType })}
             onDelete={(path) => setDeleteConfirm(path)}
             onRefresh={refreshTree}
           />
@@ -138,6 +176,8 @@ export default function App() {
         <EditNodeModal
           path={editModal.path}
           initialData={editModal.data}
+          decoded={editModal.decoded}
+          messageType={editModal.messageType}
           onClose={() => setEditModal(null)}
           onSubmit={handleEditNode}
         />

@@ -1,5 +1,143 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { getNode, getProtos, decodeData } from '../api/zookeeper'
+
+// Searchable select component for message types
+function SearchableSelect({ value, onChange, options, placeholder }) {
+  const [isOpen, setIsOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const containerRef = useRef(null)
+
+  const filteredOptions = options.filter(opt =>
+    opt.toLowerCase().includes(search.toLowerCase())
+  )
+
+  // Close on click outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setIsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const handleSelect = (opt) => {
+    onChange(opt)
+    setIsOpen(false)
+    setSearch('')
+  }
+
+  return (
+    <div ref={containerRef} className="relative flex-1">
+      <div
+        className="w-full px-3 py-2 border border-gray-300 rounded-lg cursor-pointer flex items-center justify-between bg-white"
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        <span className={value ? 'text-gray-900' : 'text-gray-400'}>
+          {value || placeholder}
+        </span>
+        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </div>
+
+      {isOpen && (
+        <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-300 rounded-lg shadow-lg z-50 max-h-80 flex flex-col">
+          <div className="p-2 border-b border-gray-200">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Type to filter..."
+              className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+              autoFocus
+            />
+          </div>
+          <div className="overflow-auto flex-1">
+            {filteredOptions.length === 0 ? (
+              <div className="px-3 py-2 text-gray-500 text-sm">No matches found</div>
+            ) : (
+              filteredOptions.slice(0, 100).map((opt) => (
+                <div
+                  key={opt}
+                  className={`px-3 py-2 cursor-pointer text-sm hover:bg-emerald-50 ${
+                    opt === value ? 'bg-emerald-100 text-emerald-800' : ''
+                  }`}
+                  onClick={() => handleSelect(opt)}
+                >
+                  {opt}
+                </div>
+              ))
+            )}
+            {filteredOptions.length > 100 && (
+              <div className="px-3 py-2 text-gray-400 text-xs border-t">
+                Showing first 100 of {filteredOptions.length} matches. Type more to filter.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// JSON syntax highlighter component
+function JsonHighlight({ data }) {
+  const json = JSON.stringify(data, null, 2)
+
+  // Tokenize and colorize JSON
+  const colorize = (str) => {
+    return str.split('\n').map((line, i) => {
+      // Process each line
+      const parts = []
+      let remaining = line
+      let key = 0
+
+      // Match patterns in order (patterns must match at least 1 char)
+      const patterns = [
+        { regex: /^\s+/, className: '' }, // leading whitespace (1+ chars)
+        { regex: /^"([^"\\]|\\.)*"(?=\s*:)/, className: 'text-purple-600' }, // keys
+        { regex: /^:\s*/, className: 'text-gray-600' }, // colon
+        { regex: /^"([^"\\]|\\.)*"/, className: 'text-green-600' }, // string values
+        { regex: /^(true|false)/, className: 'text-orange-600' }, // booleans
+        { regex: /^null/, className: 'text-gray-400' }, // null
+        { regex: /^-?\d+\.?\d*([eE][+-]?\d+)?/, className: 'text-blue-600' }, // numbers
+        { regex: /^[{}\[\],]/, className: 'text-gray-500' }, // brackets and commas
+      ]
+
+      while (remaining.length > 0) {
+        let matched = false
+        for (const { regex, className } of patterns) {
+          const match = remaining.match(regex)
+          if (match && match[0].length > 0) {
+            parts.push(
+              <span key={key++} className={className}>
+                {match[0]}
+              </span>
+            )
+            remaining = remaining.slice(match[0].length)
+            matched = true
+            break
+          }
+        }
+        if (!matched) {
+          // No pattern matched, take one character
+          parts.push(<span key={key++}>{remaining[0]}</span>)
+          remaining = remaining.slice(1)
+        }
+      }
+
+      return (
+        <div key={i}>
+          {parts}
+        </div>
+      )
+    })
+  }
+
+  return <>{colorize(json)}</>
+}
 
 function DataTab({ node, onDecode }) {
   const [viewMode, setViewMode] = useState('string') // string, hex, json
@@ -51,21 +189,66 @@ function DataTab({ node, onDecode }) {
   )
 }
 
-function DecodedTab({ node, messageTypes, pathMappings }) {
+function DecodedTab({ node, messageTypes, zkRootPath, zkPathTypeMappings, onDecoded }) {
   const [selectedType, setSelectedType] = useState('')
   const [decoded, setDecoded] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [autoDecoded, setAutoDecoded] = useState(false)
+  const [copied, setCopied] = useState(false)
 
-  // Auto-select type based on path mapping
-  useEffect(() => {
-    if (!selectedType && pathMappings.length > 0) {
-      const mapping = pathMappings.find(m => node.path.startsWith(m.path))
-      if (mapping) {
-        setSelectedType(mapping.type)
-      }
+  const handleCopy = async () => {
+    if (!decoded) return
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(decoded, null, 2))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (err) {
+      console.error('Failed to copy:', err)
     }
-  }, [node.path, pathMappings, selectedType])
+  }
+
+  // Get auto-detected type based on ZK path mapping
+  const getAutoType = () => {
+    if (!zkPathTypeMappings || Object.keys(zkPathTypeMappings).length === 0) return null
+    let relativePath = node.path
+    if (zkRootPath && node.path.startsWith(zkRootPath)) {
+      relativePath = node.path.slice(zkRootPath.length)
+    }
+    const segments = relativePath.split('/').filter(s => s)
+    if (segments.length > 0) {
+      return zkPathTypeMappings[segments[0]] || null
+    }
+    return null
+  }
+
+  // Reset and auto-decode when node changes
+  useEffect(() => {
+    // Reset state
+    setDecoded(null)
+    setError(null)
+    setAutoDecoded(false)
+    onDecoded?.(null, null)
+
+    // Auto-select type and decode
+    const autoType = getAutoType()
+    if (autoType) {
+      setSelectedType(autoType)
+      if (node.dataHex) {
+        setLoading(true)
+        decodeData(node.dataHex, autoType, node.path)
+          .then(result => {
+            setDecoded(result.decoded)
+            setAutoDecoded(true)
+            onDecoded?.(result.decoded, autoType)
+          })
+          .catch(err => setError(err.message))
+          .finally(() => setLoading(false))
+      }
+    } else {
+      setSelectedType('')
+    }
+  }, [node.path, node.dataHex, zkRootPath, zkPathTypeMappings])
 
   const handleDecode = async () => {
     if (!selectedType || !node.dataHex) return
@@ -75,6 +258,7 @@ function DecodedTab({ node, messageTypes, pathMappings }) {
     try {
       const result = await decodeData(node.dataHex, selectedType, node.path)
       setDecoded(result.decoded)
+      onDecoded?.(result.decoded, selectedType)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -95,20 +279,14 @@ function DecodedTab({ node, messageTypes, pathMappings }) {
   }
 
   return (
-    <div className="p-4">
-      <div className="flex items-center gap-2 mb-4">
-        <select
+    <div className="h-full flex flex-col p-4">
+      <div className="flex items-center gap-2 mb-4 flex-shrink-0">
+        <SearchableSelect
           value={selectedType}
-          onChange={(e) => setSelectedType(e.target.value)}
-          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
-        >
-          <option value="">Select message type...</option>
-          {messageTypes.map((type) => (
-            <option key={type} value={type}>
-              {type}
-            </option>
-          ))}
-        </select>
+          onChange={setSelectedType}
+          options={messageTypes}
+          placeholder="Select message type..."
+        />
         <button
           onClick={handleDecode}
           disabled={!selectedType || loading}
@@ -119,15 +297,41 @@ function DecodedTab({ node, messageTypes, pathMappings }) {
       </div>
 
       {error && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm flex-shrink-0">
           {error}
         </div>
       )}
 
       {decoded && (
-        <pre className="bg-gray-50 p-4 rounded-lg overflow-auto text-sm font-mono max-h-96">
-          {JSON.stringify(decoded, null, 2)}
-        </pre>
+        <div className="relative flex-1 min-h-0 flex flex-col">
+          <button
+            onClick={handleCopy}
+            className="absolute top-2 right-5 p-1.5 rounded bg-white border border-gray-300 hover:bg-gray-100 text-gray-600 hover:text-gray-800 z-10"
+            title="Copy JSON"
+          >
+            {copied ? (
+              <svg className="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
+            )}
+          </button>
+          <pre className="bg-gray-50 p-4 rounded-lg overflow-auto text-sm font-mono flex-1 min-h-0">
+            <JsonHighlight data={decoded} />
+          </pre>
+        </div>
+      )}
+
+      {loading && !decoded && (
+        <div className="flex-1 flex items-center justify-center">
+          <svg className="w-8 h-8 animate-spin text-emerald-600" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        </div>
       )}
     </div>
   )
@@ -204,13 +408,31 @@ function ACLTab({ acl }) {
   )
 }
 
-export default function NodeView({ path, onCreateChild, onEdit, onDelete, onRefresh }) {
+// Helper to check if a path has an auto-detectable type
+function getAutoTypeForPath(path, zkRootPath, zkPathTypeMappings) {
+  if (!zkPathTypeMappings || Object.keys(zkPathTypeMappings).length === 0) return null
+  let relativePath = path
+  if (zkRootPath && path.startsWith(zkRootPath)) {
+    relativePath = path.slice(zkRootPath.length)
+  }
+  const segments = relativePath.split('/').filter(s => s)
+  if (segments.length > 0) {
+    return zkPathTypeMappings[segments[0]] || null
+  }
+  return null
+}
+
+export default function NodeView({ path, readOnly, onCreateChild, onEdit, onDelete, onRefresh }) {
   const [node, setNode] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [activeTab, setActiveTab] = useState('data')
   const [messageTypes, setMessageTypes] = useState([])
-  const [pathMappings, setPathMappings] = useState([])
+  const [zkRootPath, setZkRootPath] = useState('')
+  const [zkPathTypeMappings, setZkPathTypeMappings] = useState({})
+  // Decoded data for edit support
+  const [decodedData, setDecodedData] = useState(null)
+  const [decodedMessageType, setDecodedMessageType] = useState(null)
 
   useEffect(() => {
     if (path) {
@@ -221,6 +443,25 @@ export default function NodeView({ path, onCreateChild, onEdit, onDelete, onRefr
   useEffect(() => {
     loadProtos()
   }, [])
+
+  // Auto-switch to Decoded tab when type is auto-detectable and node has data
+  useEffect(() => {
+    if (node?.dataHex && getAutoTypeForPath(path, zkRootPath, zkPathTypeMappings)) {
+      setActiveTab('decoded')
+    }
+  }, [node, path, zkRootPath, zkPathTypeMappings])
+
+  // Reset decoded data when path changes
+  useEffect(() => {
+    setDecodedData(null)
+    setDecodedMessageType(null)
+  }, [path])
+
+  // Callback for DecodedTab to report decoded data
+  const handleDecoded = (data, messageType) => {
+    setDecodedData(data)
+    setDecodedMessageType(messageType)
+  }
 
   const loadNode = async () => {
     setLoading(true)
@@ -239,7 +480,8 @@ export default function NodeView({ path, onCreateChild, onEdit, onDelete, onRefr
     try {
       const data = await getProtos()
       setMessageTypes(data.messageTypes || [])
-      setPathMappings(data.pathMappings || [])
+      setZkRootPath(data.zkRootPath || '')
+      setZkPathTypeMappings(data.zkPathTypeMappings || {})
     } catch (err) {
       console.error('Failed to load protos:', err)
     }
@@ -314,28 +556,30 @@ export default function NodeView({ path, onCreateChild, onEdit, onDelete, onRefr
         </div>
 
         {/* Actions */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => onCreateChild?.(path)}
-            className="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700"
-          >
-            + Create Child
-          </button>
-          <button
-            onClick={() => onEdit?.(path, node.data)}
-            className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
-          >
-            Edit
-          </button>
-          {path !== '/' && (
+        {!readOnly && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => onDelete?.(path)}
-              className="px-3 py-1.5 text-sm text-red-600 border border-red-300 rounded hover:bg-red-50"
+              onClick={() => onCreateChild?.(path)}
+              className="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700"
             >
-              Delete
+              + Create Child
             </button>
-          )}
-        </div>
+            <button
+              onClick={() => onEdit?.(path, node.data, decodedData, decodedMessageType)}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
+            >
+              Edit
+            </button>
+            {path !== '/' && (
+              <button
+                onClick={() => onDelete?.(path)}
+                className="px-3 py-1.5 text-sm text-red-600 border border-red-300 rounded hover:bg-red-50"
+              >
+                Delete
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Tabs */}
@@ -364,7 +608,9 @@ export default function NodeView({ path, onCreateChild, onEdit, onDelete, onRefr
           <DecodedTab
             node={node}
             messageTypes={messageTypes}
-            pathMappings={pathMappings}
+            zkRootPath={zkRootPath}
+            zkPathTypeMappings={zkPathTypeMappings}
+            onDecoded={handleDecoded}
           />
         )}
         {activeTab === 'stat' && <StatTab stat={node.stat} />}

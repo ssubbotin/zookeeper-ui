@@ -1,12 +1,38 @@
 import { useState, useEffect } from 'react'
 import { getChildren } from '../api/zookeeper'
 
-function TreeNode({ node, selectedPath, onSelect, level = 0 }) {
+function TreeNode({ node, selectedPath, onSelect, level = 0, filter }) {
   const [expanded, setExpanded] = useState(false)
   const [children, setChildren] = useState([])
   const [loading, setLoading] = useState(false)
 
   const isSelected = selectedPath === node.path
+  // Check if this node is an ancestor of the selected path
+  const isAncestorOfSelected = selectedPath.startsWith(node.path + '/')
+  // Check if this node has filtered descendants (should auto-expand)
+  const hasFilteredDescendants = filter && Array.from(filter).some(p => p.startsWith(node.path + '/'))
+
+  // Auto-expand if this node is an ancestor of the selected path or has filtered descendants
+  useEffect(() => {
+    if ((isAncestorOfSelected || hasFilteredDescendants) && !expanded && node.hasChildren) {
+      loadAndExpand()
+    }
+  }, [selectedPath, filter])
+
+  const loadAndExpand = async () => {
+    if (children.length === 0) {
+      setLoading(true)
+      try {
+        const data = await getChildren(node.path)
+        setChildren(data)
+      } catch (err) {
+        console.error('Failed to load children:', err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    setExpanded(true)
+  }
 
   const handleToggle = async (e) => {
     e.stopPropagation()
@@ -82,22 +108,25 @@ function TreeNode({ node, selectedPath, onSelect, level = 0 }) {
       {/* Children */}
       {expanded && children.length > 0 && (
         <div>
-          {children.map((child) => (
-            <TreeNode
-              key={child.path}
-              node={child}
-              selectedPath={selectedPath}
-              onSelect={onSelect}
-              level={level + 1}
-            />
-          ))}
+          {children
+            .filter(child => !filter || filter.has(child.path))
+            .map((child) => (
+              <TreeNode
+                key={child.path}
+                node={child}
+                selectedPath={selectedPath}
+                onSelect={onSelect}
+                level={level + 1}
+                filter={filter}
+              />
+            ))}
         </div>
       )}
     </div>
   )
 }
 
-export default function TreeView({ selectedPath, onSelect }) {
+export default function TreeView({ selectedPath, onSelect, filter }) {
   const [rootChildren, setRootChildren] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -162,15 +191,18 @@ export default function TreeView({ selectedPath, onSelect }) {
       </div>
 
       {/* Children */}
-      {rootChildren.map((child) => (
-        <TreeNode
-          key={child.path}
-          node={child}
-          selectedPath={selectedPath}
-          onSelect={onSelect}
-          level={1}
-        />
-      ))}
+      {rootChildren
+        .filter(child => !filter || filter.has(child.path))
+        .map((child) => (
+          <TreeNode
+            key={child.path}
+            node={child}
+            selectedPath={selectedPath}
+            onSelect={onSelect}
+            level={1}
+            filter={filter}
+          />
+        ))}
     </div>
   )
 }
